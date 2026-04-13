@@ -1,0 +1,7 @@
+docker pull nvcr.io/nvidia/nemo:25.02
+
+docker run --gpus all -it --rm \
+    -v /path/to/your/data:/data \
+    -v /path/to/your/scripts:/workspace \
+    nvcr.io/nvidia/nemo:25.02 \
+    bash
