@@ -1,21 +1,30 @@
 #!/bin/bash
 # =============================================================================
 #  run_finetune.sh
-#  싱글 노드 멀티 GPU 파인튜닝 실행 스크립트
-#  torchrun 사용 (SLURM/srun 불필요)
+#
+#  Single-node multi-GPU fine-tuning for nvidia/canary-qwen-2.5b
+#  Strategy : FSDP (Fully Sharded Data Parallel)
+#  Launcher  : torchrun  (no SLURM / srun required)
+#
+#  Usage:
+#    chmod +x run_finetune.sh
+#    ./run_finetune.sh
+#
+#  Background:
+#    nohup ./run_finetune.sh > logs/nohup.out 2>&1 &
 # =============================================================================
 
 # ------------------------------------------------------------------ #
-#  설정값 — 여기만 수정하세요                                           #
+#  User settings — edit only this section                              #
 # ------------------------------------------------------------------ #
 
-# 사용할 GPU 번호 (예: "0,1,2,3" 또는 "0,1")
+# GPU IDs to use  (e.g. "0,1,2,3"  or  "0,1")
 CUDA_VISIBLE="0,1,2,3"
 
-# GPU 개수 (CUDA_VISIBLE 개수와 일치시킬 것)
+# Number of GPUs  (must match the count above)
 NUM_GPUS=4
 
-# 경로
+# Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NEMO_CKPT="${SCRIPT_DIR}/canary-qwen-2.5b.nemo"
 TRAIN_INPUT_CFG="${SCRIPT_DIR}/input_cfg.yaml"
@@ -24,60 +33,67 @@ RESULTS_DIR="${SCRIPT_DIR}/results"
 LOG_DIR="${SCRIPT_DIR}/logs"
 
 # ------------------------------------------------------------------ #
-#  사전 체크                                                            #
+#  Pre-flight checks                                                   #
 # ------------------------------------------------------------------ #
-set -e  # 오류 발생 시 즉시 종료
+set -e  # exit immediately on error
 
 mkdir -p "${RESULTS_DIR}" "${LOG_DIR}"
 
-echo "=============================================="
-echo "  canary-qwen-2.5b Fine-tuning"
-echo "  GPUs : ${CUDA_VISIBLE} (${NUM_GPUS}개)"
-echo "  CKPT : ${NEMO_CKPT}"
-echo "  결과 : ${RESULTS_DIR}"
-echo "=============================================="
+echo "=================================================="
+echo "  canary-qwen-2.5b  |  FSDP Fine-tuning"
+echo "  GPUs   : ${CUDA_VISIBLE}  (${NUM_GPUS} devices)"
+echo "  CKPT   : ${NEMO_CKPT}"
+echo "  Output : ${RESULTS_DIR}"
+echo "=================================================="
 
-# checkpoint 존재 확인
 if [ ! -f "${NEMO_CKPT}" ]; then
-    echo "[ERROR] NeMo checkpoint 없음: ${NEMO_CKPT}"
-    echo "        save_modules.py 또는 HuggingFace Hub에서 먼저 다운로드하세요."
+    echo "[ERROR] Checkpoint not found: ${NEMO_CKPT}"
+    echo "        Download it first via save_modules.py or HuggingFace Hub."
     exit 1
 fi
 
 # ------------------------------------------------------------------ #
-#  환경 변수                                                            #
+#  Environment variables                                               #
 # ------------------------------------------------------------------ #
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE}"
 
-# NCCL 설정 (단일 노드 최적화)
+# --- NCCL (single-node) ---
 export NCCL_DEBUG=WARN
-export NCCL_IB_DISABLE=1          # InfiniBand 없는 경우
-export NCCL_P2P_DISABLE=0         # NVLink P2P 활성화
-export NCCL_SOCKET_IFNAME=lo      # 단일 노드는 loopback 사용
+export NCCL_IB_DISABLE=1           # disable InfiniBand (not present on single node)
+export NCCL_P2P_DISABLE=0          # enable NVLink P2P
+export NCCL_SOCKET_IFNAME=lo       # use loopback for single-node comms
 
-# PyTorch 관련
+# --- FSDP / PyTorch ---
 export TORCH_NCCL_BLOCKING_WAIT=1
 export OMP_NUM_THREADS=4
 
+# FSDP requires this to avoid timeout on large model sharding at startup
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+# Increase timeout for FSDP all-gather on large models (seconds)
+export NCCL_TIMEOUT=1800
+
 # ------------------------------------------------------------------ #
-#  torchrun으로 실행                                                    #
+#  Launch with torchrun                                                #
 # ------------------------------------------------------------------ #
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-LOG_FILE="${LOG_DIR}/finetune_${TIMESTAMP}.log"
+LOG_FILE="${LOG_DIR}/finetune_fsdp_${TIMESTAMP}.log"
 
-echo "로그 파일: ${LOG_FILE}"
+echo "Log file : ${LOG_FILE}"
 echo ""
 
 torchrun \
     --standalone \
     --nnodes=1 \
     --nproc_per_node="${NUM_GPUS}" \
+    --master_addr=127.0.0.1 \
     --master_port=29500 \
     "${SCRIPT_DIR}/finetune_canary_qwen.py" \
         --config-path="${SCRIPT_DIR}" \
         --config-name=canary_qwen_finetune \
         trainer.devices="${NUM_GPUS}" \
         trainer.num_nodes=1 \
+        trainer.precision=bf16-true \
         model.pretrained_weights=False \
         model.canary_qwen_pretrained_path="${NEMO_CKPT}" \
         "data.train_ds.input_cfg[0].input_cfg=${TRAIN_INPUT_CFG}" \
@@ -86,6 +102,6 @@ torchrun \
     2>&1 | tee "${LOG_FILE}"
 
 echo ""
-echo "=== 완료 ==="
-echo "결과: ${RESULTS_DIR}"
-echo "로그: ${LOG_FILE}"
+echo "=== Done ==="
+echo "Results : ${RESULTS_DIR}"
+echo "Log     : ${LOG_FILE}"
