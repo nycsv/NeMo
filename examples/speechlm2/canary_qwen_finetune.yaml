@@ -1,0 +1,242 @@
+# =============================================================================
+#  canary_qwen_finetune.yaml
+#
+#  Fine-tuning config for nvidia/canary-qwen-2.5b with NeMo SpeechLM2.
+#
+#  Reference:
+#    https://huggingface.co/nvidia/canary-qwen-2.5b/discussions/13
+#
+#  Usage:
+#    python finetune_canary_qwen.py \
+#        --config-path=. \
+#        --config-name=canary_qwen_finetune \
+#        model.canary_qwen_pretrained_path=/path/to/canary-qwen-2.5b.nemo
+#
+#  Modes:
+#    A) Fine-tune from the released checkpoint  →  pretrained_weights: False
+#       (set model.canary_qwen_pretrained_path)
+#    B) Train from scratch using pretrained LLM + ASR backbones  →  pretrained_weights: True
+# =============================================================================
+
+# ------------------------------------------------------------------ #
+#  Model                                                               #
+# ------------------------------------------------------------------ #
+model:
+  # ---- backbone sources ------------------------------------------------
+  # Used when pretrained_weights: True  (training from scratch with
+  # pretrained LLM + ASR encoder, as done for the released model)
+  pretrained_llm: Qwen/Qwen3-1.7B
+  pretrained_asr: nvidia/canary-1b-flash
+
+  # Set to False for fine-tuning; supply canary_qwen_pretrained_path below.
+  pretrained_weights: False
+
+  # Path to canary-qwen-2.5b.ckpt prepared by save_checkpoint.py.
+  # Format: torch.save({"state_dict": ..., "config": ...}, path)
+  # Only used when pretrained_weights: False.
+  canary_qwen_pretrained_path: /path/to/canary-qwen-2.5b.ckpt
+
+  # ---- parameter freezing ----------------------------------------------
+  # Regexp patterns (re.compile) for parameters to freeze.
+  freeze_params:
+    # Keep LLM frozen; only LoRA + perception adapter are trained.
+    - "^llm\\..+$"           # LLM backbone
+    - "^embed_tokens\\..+$"  # LLM embedding (moved out of LLM module)
+    # To also freeze the ASR encoder, uncomment:
+    # - "^perception\\.preprocessor\\..+$"
+    # - "^perception\\.encoder\\..+$"
+  prevent_freeze_params: []    # override freeze_params for specific submodules
+
+  # ---- LoRA ------------------------------------------------------------
+  lora:
+    task_type: CAUSAL_LM
+    r: 128
+    lora_alpha: 256
+    lora_dropout: 0.01
+    target_modules: ["q_proj", "v_proj"]
+
+  # ---- prompt / audio config -------------------------------------------
+  prompt_format: qwen
+  audio_locator_tag: "<|audioplaceholder|>"
+
+  # ---- perception module -----------------------------------------------
+  perception:
+    target: nemo.collections.speechlm2.modules.perception.AudioPerceptionModule
+    output_dim: 2048
+    modality_adapter:
+      _target_: nemo.collections.speechlm2.modules.perception.IdentityConnector
+      d_model: 1024
+
+    # Spectrogram augmentation (uncomment to enable during fine-tuning)
+    # spec_augment:
+    #   _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+    #   freq_masks: 2
+    #   time_masks: 10
+    #   freq_width: 27
+    #   time_width: 5    # 5 frames ≈ 50 ms
+
+  # ---- optimizer -------------------------------------------------------
+  # Using PyTorch native AdamW — no Apex dependency required.
+  # Alternatives if you need distributed fused adam after fixing Apex:
+  #   _target_: apex.contrib.optimizers.distributed_fused_adam.DistributedFusedAdam
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 1e-4
+    betas: [0.9, 0.98]
+    weight_decay: 1e-3
+    foreach: true      # vectorised update, faster than loop-based on multi-GPU
+
+  # ---- LR scheduler ----------------------------------------------------
+  lr_scheduler:
+    _target_: nemo.core.optim.lr_scheduler.CosineAnnealing
+    warmup_steps: 500
+    min_lr: 1e-6
+    max_steps: ${trainer.max_steps}
+
+
+# ------------------------------------------------------------------ #
+#  Trainer                                                             #
+# ------------------------------------------------------------------ #
+trainer:
+  devices: -1               # use all available GPUs
+  accelerator: gpu
+  num_nodes: 1
+  precision: bf16-true
+  logger: False             # handled by exp_manager
+  enable_checkpointing: False
+  use_distributed_sampler: False
+
+  max_steps: 10000          # adjust to your dataset size
+  limit_train_batches: 1000 # steps per "epoch" / validation cycle
+  val_check_interval: ${trainer.limit_train_batches}
+  limit_val_batches: 20
+  log_every_n_steps: 10
+  num_sanity_val_steps: 1
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+
+  strategy:
+    _target_: lightning.pytorch.strategies.FSDPStrategy
+    # Sharding strategy:
+    #   FULL_SHARD       — maximum memory saving (shard params + grads + optimizer)
+    #   SHARD_GRAD_OP    — shard grads + optimizer only (faster, more memory)
+    #   NO_SHARD         — equivalent to DDP
+    sharding_strategy: FULL_SHARD
+    auto_wrap_policy:
+      # Wrap each Transformer block independently for optimal sharding
+      _target_: torch.distributed.fsdp.wrap.transformer_auto_wrap_policy
+      transformer_layer_cls:
+        # Qwen3 transformer block
+        - nemo.collections.nlp.modules.common.megatron.module.Float16Module
+    cpu_offload:
+      _target_: torch.distributed.fsdp.CPUOffload
+      offload_params: false    # set true to offload params to CPU (saves VRAM, slower)
+    mixed_precision:
+      _target_: torch.distributed.fsdp.MixedPrecision
+      param_dtype: torch.bfloat16
+      reduce_dtype: torch.bfloat16
+      buffer_dtype: torch.bfloat16
+    backward_prefetch: BACKWARD_PRE   # prefetch next layer's params during backward
+    forward_prefetch: true
+    limit_all_gathers: true           # reduce NCCL overhead
+
+
+# ------------------------------------------------------------------ #
+#  Data                                                                #
+# ------------------------------------------------------------------ #
+data:
+  # ---- Training --------------------------------------------------------
+  train_ds:
+    sample_rate: 16000
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08   # 1 token ≈ 80 ms of audio
+
+    # For standard NeMo manifests, remove text_field / lang_field.
+    # They are only needed for custom-formatted data.
+    # text_field: answer
+    # lang_field: target_lang
+
+    input_cfg:
+      - type: lhotse_as_conversation
+        # Point this to your input_cfg.yaml (see input_cfg.yaml)
+        input_cfg: /path/to/input_cfg.yaml
+        audio_locator_tag: ${model.audio_locator_tag}
+        tags:
+          context: 'Transcribe the following:'
+
+    seed: 42
+    shuffle: true
+    shard_seed: "randomized"
+    num_workers: 4
+
+    # ---- bucketed batching (keeps GPU utilisation high) ----------------
+    use_multimodal_sampling: true
+    min_duration: 0.1
+    min_tokens: 2
+    max_tokens: 1024
+
+    use_bucketing: true
+    num_buckets: 16
+    bucket_buffer_size: 20000
+    # Duration bins (seconds) and batch sizes tuned for A100 80 GB.
+    # Reduce bucket_batch_size values for smaller GPUs (e.g. 40 GB halve them).
+    bucket_duration_bins:
+      [99, 110, 117, 124, 184, 247, 324, 391, 457, 520, 555, 579, 600, 618, 638, 1024]
+    bucket_batch_size:
+      [69,  64,  60,  40,  28,  22,  16,  14,  12,  11,  10,   6,   4,   4,   4,    2]
+
+  # ---- Validation ------------------------------------------------------
+  validation_ds:
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08
+    sample_rate: 16000
+    batch_size: 8
+    seed: 42
+    shard_seed: "randomized"
+
+    # Each entry under 'datasets' becomes a separate validation dataloader.
+    datasets:
+      my_devset:
+        input_cfg:
+          - type: lhotse_as_conversation
+            # Point to your Lhotse validation CutSet (.jsonl or .jsonl.gz)
+            cuts_path: /path/to/val_cuts.jsonl.gz
+            audio_locator_tag: ${model.audio_locator_tag}
+            tags:
+              context: 'Transcribe the following:'
+
+
+# ------------------------------------------------------------------ #
+#  Experiment Manager                                                  #
+# ------------------------------------------------------------------ #
+exp_manager:
+  exp_dir: null
+  explicit_log_dir: canary-qwen-finetune-results/
+  name: canary-qwen-2.5b-finetune
+  create_tensorboard_logger: true
+  create_checkpoint_callback: true
+  use_datetime_version: true
+
+  # Checkpoint resume
+  resume_from_checkpoint: null
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
+
+  # Max runtime per job (HH:MM:SS:00); useful for SLURM / multi-job runs.
+  # max_time_per_run: "00:03:50:00"
+
+  checkpoint_callback_params:
+    filename: "step={step}-val_wer={val_wer:.4f}"
+    monitor: val_wer          # or val_acc depending on NeMo version
+    mode: min
+    every_n_train_steps: null
+    every_n_epochs: 1
+    save_top_k: 3
+    always_save_nemo: false
+
+  # ---- Weights & Biases (optional) ------------------------------------
+  create_wandb_logger: false
+  wandb_logger_kwargs:
+    name: canary-qwen-2.5b-finetune
+    project: canary-qwen
+    resume: true
