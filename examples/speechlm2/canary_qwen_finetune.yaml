@@ -10,7 +10,7 @@
 #    python finetune_canary_qwen.py \
 #        --config-path=. \
 #        --config-name=canary_qwen_finetune \
-#        model.canary_qwen_pretrained_path=/path/to/canary-qwen-2.5b.nemo
+#        model.canary_qwen_pretrained_path=/path/to/canary-qwen-2.5b.ckpt
 #
 #  Modes:
 #    A) Fine-tune from the released checkpoint  →  pretrained_weights: False
