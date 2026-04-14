@@ -26,7 +26,7 @@ NUM_GPUS=4
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NEMO_CKPT="${SCRIPT_DIR}/canary-qwen-2.5b.nemo"
+CKPT="${SCRIPT_DIR}/canary-qwen-2.5b.ckpt"
 TRAIN_INPUT_CFG="${SCRIPT_DIR}/input_cfg.yaml"
 VAL_CUTS="/path/to/val_cuts.jsonl.gz"
 RESULTS_DIR="${SCRIPT_DIR}/results"
@@ -42,13 +42,13 @@ mkdir -p "${RESULTS_DIR}" "${LOG_DIR}"
 echo "=================================================="
 echo "  canary-qwen-2.5b  |  FSDP Fine-tuning"
 echo "  GPUs   : ${CUDA_VISIBLE}  (${NUM_GPUS} devices)"
-echo "  CKPT   : ${NEMO_CKPT}"
+echo "  CKPT   : ${CKPT}"
 echo "  Output : ${RESULTS_DIR}"
 echo "=================================================="
 
-if [ ! -f "${NEMO_CKPT}" ]; then
-    echo "[ERROR] Checkpoint not found: ${NEMO_CKPT}"
-    echo "        Download it first via save_modules.py or HuggingFace Hub."
+if [ ! -f "${CKPT}" ]; then
+    echo "[ERROR] Checkpoint not found: ${CKPT}"
+    echo "        Run: python save_checkpoint.py --output ${CKPT}"
     exit 1
 fi
 
@@ -95,7 +95,7 @@ torchrun \
         trainer.num_nodes=1 \
         trainer.precision=bf16-true \
         model.pretrained_weights=False \
-        model.canary_qwen_pretrained_path="${NEMO_CKPT}" \
+        model.canary_qwen_pretrained_path="${CKPT}" \
         "data.train_ds.input_cfg[0].input_cfg=${TRAIN_INPUT_CFG}" \
         "data.validation_ds.datasets.my_devset.input_cfg[0].cuts_path=${VAL_CUTS}" \
         exp_manager.explicit_log_dir="${RESULTS_DIR}" \
