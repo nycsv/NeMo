@@ -40,16 +40,24 @@ def train(cfg):
 
     profiler_cfg = cfg.get("profiler", None)
     if profiler_cfg is not None and profiler_cfg.get("enabled", False):
-        profiler_callback = PytorchProfilerCallback(
-            start_step=profiler_cfg.start_step,
-            end_step=profiler_cfg.end_step,
-            warmup_steps=profiler_cfg.get("warmup_steps", 0),
-            active_steps=profiler_cfg.get("active_steps", 1),
-            trace_dir=profiler_cfg.get("trace_dir", None),
-            profiler_kwargs=OmegaConf.to_container(profiler_cfg.profiler_kwargs)
-            if profiler_cfg.get("profiler_kwargs") else None,
+        warmup_steps = profiler_cfg.get("warmup_steps", 1)
+        active_steps = profiler_cfg.get("active_steps", 3)
+        profiler_kwargs = OmegaConf.to_container(profiler_cfg.profiler_kwargs) if profiler_cfg.get("profiler_kwargs") else {}
+        # Override schedule with repeat=1 to prevent infinite cycling (which spams "Disabling Execution Trace Observer")
+        profiler_kwargs["schedule"] = torch.profiler.schedule(
+            wait=0, warmup=warmup_steps, active=active_steps, repeat=1
         )
-        trainer.callbacks.append(profiler_callback)
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        if local_rank == profiler_cfg.get("rank", 0):
+            profiler_callback = PytorchProfilerCallback(
+                start_step=profiler_cfg.start_step,
+                end_step=profiler_cfg.start_step + warmup_steps + active_steps,
+                warmup_steps=warmup_steps,
+                active_steps=active_steps,
+                trace_dir=profiler_cfg.get("trace_dir", None),
+                profiler_kwargs=profiler_kwargs,
+            )
+            trainer.callbacks.append(profiler_callback)
 
     dataset = SALMDataset(tokenizer=model.tokenizer)
     datamodule = DataModule(cfg.data, tokenizer=model.tokenizer, dataset=dataset)
