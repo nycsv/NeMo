@@ -19,6 +19,7 @@ from omegaconf import OmegaConf
 
 from nemo.collections.speechlm2 import SALM, DataModule, SALMDataset
 from nemo.core.config import hydra_runner
+from nemo.lightning.pytorch.callbacks import PytorchProfilerCallback
 from nemo.utils.exp_manager import exp_manager
 from nemo.utils.trainer_utils import resolve_trainer_cfg
 
@@ -36,6 +37,19 @@ def train(cfg):
 
     with trainer.init_module():
         model = SALM(OmegaConf.to_container(cfg.model, resolve=True))
+
+    profiler_cfg = cfg.get("profiler", None)
+    if profiler_cfg is not None and profiler_cfg.get("enabled", False):
+        profiler_callback = PytorchProfilerCallback(
+            start_step=profiler_cfg.start_step,
+            end_step=profiler_cfg.end_step,
+            warmup_steps=profiler_cfg.get("warmup_steps", 0),
+            active_steps=profiler_cfg.get("active_steps", 1),
+            trace_dir=profiler_cfg.get("trace_dir", None),
+            profiler_kwargs=OmegaConf.to_container(profiler_cfg.profiler_kwargs)
+            if profiler_cfg.get("profiler_kwargs") else None,
+        )
+        trainer.callbacks.append(profiler_callback)
 
     dataset = SALMDataset(tokenizer=model.tokenizer)
     datamodule = DataModule(cfg.data, tokenizer=model.tokenizer, dataset=dataset)
