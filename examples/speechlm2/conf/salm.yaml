@@ -163,3 +163,14 @@ exp_manager:
      save_top_k: 1
      always_save_nemo: false
      save_nemo_on_train_end: false
+
+profiler:
+   enabled: false       # set to true to enable PyTorch profiling
+   start_step: 10       # global step to start profiling
+   end_step: 20         # global step to stop profiling
+   warmup_steps: 0      # warmup steps within the profiling window
+   active_steps: 5      # number of active steps to capture traces
+   trace_dir: null      # output directory; defaults to ./traces if null
+   # profiler_kwargs:   # optional extra kwargs forwarded to torch.profiler.profile
+   #   with_stack: true
+   #   record_shapes: true
