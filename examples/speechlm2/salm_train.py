@@ -39,25 +39,27 @@ def train(cfg):
         model = SALM(OmegaConf.to_container(cfg.model, resolve=True))
 
     profiler_cfg = cfg.get("profiler", None)
-    if profiler_cfg is not None and profiler_cfg.get("enabled", False):
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if profiler_cfg is not None and profiler_cfg.get("enabled", False) and local_rank == profiler_cfg.get("rank", 0):
         warmup_steps = profiler_cfg.get("warmup_steps", 1)
         active_steps = profiler_cfg.get("active_steps", 3)
+        trace_dir = profiler_cfg.get("trace_dir", None) or os.path.join(os.getcwd(), "traces")
+        os.makedirs(trace_dir, exist_ok=True)
         profiler_kwargs = OmegaConf.to_container(profiler_cfg.profiler_kwargs) if profiler_cfg.get("profiler_kwargs") else {}
-        # Override schedule with repeat=1 to prevent infinite cycling (which spams "Disabling Execution Trace Observer")
+        # repeat=1 prevents infinite schedule cycling (which spams "Disabling Execution Trace Observer")
         profiler_kwargs["schedule"] = torch.profiler.schedule(
             wait=0, warmup=warmup_steps, active=active_steps, repeat=1
         )
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        if local_rank == profiler_cfg.get("rank", 0):
-            profiler_callback = PytorchProfilerCallback(
-                start_step=profiler_cfg.start_step,
-                end_step=profiler_cfg.start_step + warmup_steps + active_steps,
-                warmup_steps=warmup_steps,
-                active_steps=active_steps,
-                trace_dir=profiler_cfg.get("trace_dir", None),
-                profiler_kwargs=profiler_kwargs,
-            )
-            trainer.callbacks.append(profiler_callback)
+        profiler_kwargs["on_trace_ready"] = torch.profiler.tensorboard_trace_handler(trace_dir)
+        profiler_callback = PytorchProfilerCallback(
+            start_step=profiler_cfg.start_step,
+            end_step=profiler_cfg.start_step + warmup_steps + active_steps,
+            warmup_steps=warmup_steps,
+            active_steps=active_steps,
+            trace_dir=trace_dir,
+            profiler_kwargs=profiler_kwargs,
+        )
+        trainer.callbacks.append(profiler_callback)
 
     dataset = SALMDataset(tokenizer=model.tokenizer)
     datamodule = DataModule(cfg.data, tokenizer=model.tokenizer, dataset=dataset)
