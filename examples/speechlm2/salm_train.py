@@ -26,6 +26,35 @@ from nemo.utils.trainer_utils import resolve_trainer_cfg
 torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 
+
+ 
+def _patch_save_to(model: SALM, cfg) -> None:
+    """
+    Monkey-patch save_to / restore_from onto a SALM instance so that
+    NeMoModelCheckpoint (called at the end of every validation) doesn't crash.
+ 
+    The produced .nemo file is a gzip-tar containing:
+      - model_config.yaml   (cfg.model)
+      - model_weights.pt    (state_dict)
+    """
+ 
+    def save_to(self, save_path: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path     = os.path.join(tmp, "model_config.yaml")
+            weights_path = os.path.join(tmp, "model_weights.pt")
+ 
+            OmegaConf.save(cfg, cfg_path)
+            torch.save(self.state_dict(), weights_path)
+ 
+            with tarfile.open(save_path, "w:gz") as tar:
+                tar.add(cfg_path,     arcname="model_config.yaml")
+                tar.add(weights_path, arcname="model_weights.pt")
+ 
+    # Bind as an instance method
+    import types
+    model.save_to = types.MethodType(save_to, model)
+
+
 @hydra_runner(config_path="conf", config_name="salm")
 def train(cfg):
     OmegaConf.resolve(cfg)
@@ -38,6 +67,8 @@ def train(cfg):
     with trainer.init_module():
         model = SALM(OmegaConf.to_container(cfg.model, resolve=True))
 
+    _patch_save_to(model, cfg.model)
+ 
     profiler_cfg = cfg.get("profiler", None)
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if profiler_cfg is not None and profiler_cfg.get("enabled", False) and local_rank == profiler_cfg.get("rank", 0):
