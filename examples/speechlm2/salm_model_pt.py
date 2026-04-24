@@ -45,22 +45,22 @@ class SALMModelPT(ModelPT):
     >>> model = SALMModelPT.restore_from("my_salm.nemo", trainer=trainer)
     """
 
-    def __init__(self, cfg: DictConfig, trainer: Optional[Trainer] = None):
-        # ModelPT expects cfg to be a DictConfig that contains at least a
-        # top-level key; we store the whole config under self._cfg.
-        # If the caller passes the *full* training config (with model / data /
-        # trainer sub-keys), pull out the model sub-config.
-        if "model" in cfg:
-            model_cfg = cfg.model
+    def __init__(self, cfg: Union[Dict, DictConfig], trainer: Optional[Trainer] = None):
+        # Accept exactly the same input as SALM:
+        #   SALMModelPT(OmegaConf.to_container(cfg.model, resolve=True))
+        # i.e. a plain dict or a DictConfig — either works.
+        if isinstance(cfg, dict):
+            model_dict = cfg
+            model_cfg  = OmegaConf.create(cfg)
         else:
-            model_cfg = cfg  # assume cfg is already the model sub-config
+            model_cfg  = cfg
+            model_dict = OmegaConf.to_container(cfg, resolve=True)
 
         # ModelPT.__init__ saves cfg to self._cfg
         super().__init__(cfg=model_cfg, trainer=trainer)
 
-        # Build the inner SALM (the real implementation)
-        with trainer.init_module() if trainer is not None else _nullctx():
-            self.salm = SALM(OmegaConf.to_container(model_cfg, resolve=True))
+        # Build the inner SALM the same way the original script does
+        self.salm = SALM(model_dict)
 
     # ------------------------------------------------------------------
     # Forward – delegate to inner SALM
