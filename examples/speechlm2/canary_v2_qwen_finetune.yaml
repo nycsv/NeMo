@@ -1,0 +1,300 @@
+# =============================================================================
+#  canary_v2_qwen_finetune.yaml
+#
+#  Combines canary-1b-v2 encoder with the pretrained canary-qwen-2.5b LLM.
+#
+#  Module sources
+#  ─────────────────────────────────────────────────────────────────────────────
+#  Module             Source                                    Init
+#  ──────────────────────────────────────────────────────────────────────────
+#  llm                canary-qwen-2.5b_llm.nemo                pretrained → frozen
+#  embed_tokens       canary-qwen-2.5b_embed_tokens.nemo       pretrained → frozen
+#  perception.encoder + preprocessor
+#                     nvidia/canary-1b-v2 (auto-downloaded)    pretrained → frozen
+#  perception.modality_adapter + proj
+#                     random init                               TRAINABLE
+#  ──────────────────────────────────────────────────────────────────────────
+#
+#  Rationale
+#  ─────────────────────────────────────────────────────────────────────────────
+#  canary-qwen-2.5b was originally trained with canary-1b-flash as its encoder.
+#  This config replaces that encoder with canary-1b-v2 and re-trains only the
+#  modality adapter and projection layer (the "bridge" between encoder and LLM)
+#  while keeping everything else frozen.  Once the bridge converges, unfreeze
+#  the encoder and/or enable LoRA on the LLM for end-to-end fine-tuning.
+#
+#  Prep (run once)
+#  ─────────────────────────────────────────────────────────────────────────────
+#    # 1. Download and convert full canary-qwen-2.5b
+#    python convert.py                              # → canary-qwen-2.5b.nemo
+#
+#    # 2. Extract LLM + embed_tokens modules
+#    python convert_modules.py canary-qwen-2.5b.nemo
+#    # → canary-qwen-2.5b_llm.nemo
+#    # → canary-qwen-2.5b_embed_tokens.nemo
+#
+#    # (Optional) Pre-extract canary-1b-v2 encoder to avoid repeated downloads
+#    python convert_modules.py --from-asr nvidia/canary-1b-v2
+#    # → canary-1b-v2_asr_encoder.nemo
+#
+#  Usage
+#  ─────────────────────────────────────────────────────────────────────────────
+#    torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+#        finetune_canary_qwen.py \
+#        --config-path=. \
+#        --config-name=canary_v2_qwen_finetune \
+#        model.module_weights.llm=/ckpts/canary-qwen-2.5b_llm.nemo \
+#        model.module_weights.embed_tokens=/ckpts/canary-qwen-2.5b_embed_tokens.nemo
+# =============================================================================
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  MODEL
+# ─────────────────────────────────────────────────────────────────────────────
+model:
+
+  # ── Architecture definition ───────────────────────────────────────────────
+  # pretrained_weights: False  →  these names are used for architecture config
+  # only; actual weights come from module_weights below.
+  pretrained_llm: Qwen/Qwen3-1.7B
+  pretrained_asr: nvidia/canary-1b-v2    # used for architecture reference only
+
+  pretrained_weights: False              # weights come entirely from module_weights
+
+  # No full baseline checkpoint — modules are assembled independently.
+  canary_qwen_pretrained_path: null
+
+  # ── Per-module weight sources ─────────────────────────────────────────────
+  #
+  # Load priority:  module_weights.X  >  canary_qwen_pretrained_path  >  random init
+  #
+  module_weights:
+    # LLM backbone from pretrained canary-qwen-2.5b.
+    # Produced by: python convert_modules.py canary-qwen-2.5b.nemo
+    llm:          /path/to/canary-qwen-2.5b_llm.nemo
+
+    # Token embedding paired with the LLM above.
+    embed_tokens: /path/to/canary-qwen-2.5b_embed_tokens.nemo
+
+    # Full perception module: not set — encoder is loaded via perception_from_asr,
+    # modality_adapter and proj stay randomly initialized (training target).
+    perception: null
+
+    # canary-1b-v2 encoder + preprocessor.
+    # Loads encoder.* and preprocessor.* into model.perception (strict=False).
+    # Produced by:
+    #   python convert_modules.py --from-asr nvidia/canary-1b-v2 --output-dir /path/to
+    perception_from_asr: /path/to/canary-1b-v2_asr_encoder.nemo
+
+  # ── Frozen parameters ─────────────────────────────────────────────────────
+  #
+  # Stage 1 (adapter warm-up):  freeze everything except modality_adapter + proj.
+  # Stage 2 (end-to-end):       unfreeze encoder by removing the last two patterns.
+  # Stage 3 (full fine-tune):   also remove llm / embed_tokens patterns + add LoRA.
+  #
+  freeze_params:
+    - "^llm\\..+$"                       # LLM backbone — frozen (pretrained)
+    - "^embed_tokens\\..+$"              # token embedding — frozen (pretrained)
+    - "^perception\\.encoder\\..+$"      # canary-1b-v2 encoder — frozen (pretrained)
+    - "^perception\\.preprocessor\\..+$" # mel preprocessor — frozen (pretrained)
+  prevent_freeze_params: []
+  # perception.modality_adapter.* and perception.proj.* are not listed above
+  # → they are randomly initialized and trainable.
+
+  # ── LoRA (disabled by default for Stage 1) ────────────────────────────────
+  # Enable for Stage 3 (end-to-end fine-tuning with LLM adaptation):
+  # lora:
+  #   task_type: CAUSAL_LM
+  #   r: 64
+  #   lora_alpha: 128
+  #   lora_dropout: 0.01
+  #   target_modules: ["q_proj", "v_proj"]
+
+  # ── Prompt / audio ────────────────────────────────────────────────────────
+  prompt_format: qwen
+  audio_locator_tag: "<|audioplaceholder|>"
+
+  # ── Perception module ─────────────────────────────────────────────────────
+  # Architecture must match canary-1b-v2.
+  # canary-1b-v2 uses the same FastConformer-Large backbone as canary-1b-flash:
+  # 32 layers, d_model=1024, subsampling_factor=8 (80 ms frame rate).
+  # If canary-1b-v2 differs, update feat_in / n_layers / d_model accordingly.
+  perception:
+    target: nemo.collections.speechlm2.modules.perception.AudioPerceptionModule
+    output_dim: 2048   # must match Qwen3-1.7B hidden_size (2048)
+
+    preprocessor:
+      _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
+      sample_rate: 16000
+      normalize: per_feature
+      window_size: 0.025
+      window_stride: 0.01
+      window: hann
+      features: 128
+      n_fft: 512
+      frame_splicing: 1
+      dither: 1.0e-05
+      pad_to: 0
+      pad_value: 0.0
+
+    # FastConformer-Large  (canary-1b-v2 / canary-1b-flash shared arch)
+    encoder:
+      _target_: nemo.collections.asr.modules.ConformerEncoder
+      feat_in: 128
+      feat_out: -1
+      n_layers: 32
+      d_model: 1024
+      subsampling: dw_striding
+      subsampling_factor: 8
+      subsampling_conv_channels: 256
+      causal_downsampling: false
+      ff_expansion_factor: 4
+      self_attention_model: rel_pos
+      n_heads: 8
+      att_context_size: [-1, -1]
+      att_context_probs: []
+      att_context_style: regular
+      xscaling: true
+      untie_biases: true
+      pos_emb_max_len: 5000
+      conv_kernel_size: 9
+      conv_norm_type: batch_norm
+      conv_context_size: null
+      dropout: 0.0
+      dropout_pre_encoder: 0.0
+      dropout_emb: 0.0
+      dropout_att: 0.0
+
+    # Pass-through adapter: encoder output (1024) → proj → LLM input (2048)
+    modality_adapter:
+      _target_: nemo.collections.speechlm2.modules.perception.IdentityConnector
+      d_model: 1024
+
+  # ── Optimizer ─────────────────────────────────────────────────────────────
+  # Higher LR than the standard fine-tuning config because only the randomly
+  # initialized modality_adapter and proj are being trained.
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 5.0e-4
+    betas: [0.9, 0.98]
+    weight_decay: 1.0e-3
+    foreach: true
+
+  # ── LR scheduler ──────────────────────────────────────────────────────────
+  lr_scheduler:
+    _target_: nemo.core.optim.lr_scheduler.CosineAnnealing
+    warmup_steps: 1000
+    min_lr: 1.0e-6
+    max_steps: ${trainer.max_steps}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TRAINER
+# ─────────────────────────────────────────────────────────────────────────────
+trainer:
+  accelerator: gpu
+  devices: -1
+  num_nodes: 1
+
+  strategy:
+    _target_: lightning.pytorch.strategies.DDPStrategy
+    gradient_as_bucket_view: true
+    find_unused_parameters: true
+
+  precision: bf16-true
+
+  max_steps: 20000            # adapter warm-up typically needs more steps
+  limit_train_batches: 1000
+  val_check_interval: 1000
+  limit_val_batches: 20
+  log_every_n_steps: 10
+  num_sanity_val_steps: 0
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+
+  logger: false
+  enable_checkpointing: false
+  use_distributed_sampler: false
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  DATA
+# ─────────────────────────────────────────────────────────────────────────────
+data:
+
+  train_ds:
+    sample_rate: 16000
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08   # subsampling_factor=8 → 80 ms
+
+    input_cfg:
+      - type: lhotse_as_conversation
+        input_cfg: /path/to/input_cfg.yaml
+        audio_locator_tag: ${model.audio_locator_tag}
+        tags:
+          context: "Transcribe the following:"
+
+    seed: 42
+    shuffle: true
+    shard_seed: "randomized"
+    num_workers: 4
+
+    use_multimodal_sampling: true
+    use_bucketing: true
+    num_buckets: 16
+    bucket_buffer_size: 20000
+    min_duration: 0.1
+    min_tokens: 2
+    max_tokens: 1024
+    bucket_duration_bins:
+      [99, 110, 117, 124, 184, 247, 324, 391, 457, 520, 555, 579, 600, 618, 638, 1024]
+    bucket_batch_size:
+      [69,  64,  60,  40,  28,  22,  16,  14,  12,  11,  10,   6,   4,   4,   4,    2]
+
+  validation_ds:
+    sample_rate: 16000
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08
+    batch_size: 8
+    seed: 42
+    shard_seed: "randomized"
+
+    datasets:
+      my_devset:
+        input_cfg:
+          - type: lhotse_as_conversation
+            cuts_path: /path/to/val_cuts_*.jsonl.gz
+            audio_locator_tag: ${model.audio_locator_tag}
+            tags:
+              context: "Transcribe the following:"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  EXP MANAGER
+# ─────────────────────────────────────────────────────────────────────────────
+exp_manager:
+  exp_dir: null
+  explicit_log_dir: ./canary-v2-qwen-results
+  name: canary-v2-qwen-adapter
+  use_datetime_version: true
+
+  create_tensorboard_logger: true
+  create_wandb_logger: false
+  wandb_logger_kwargs:
+    name: canary-v2-qwen-adapter
+    project: canary-qwen
+    resume: true
+
+  create_checkpoint_callback: true
+  checkpoint_callback_params:
+    filename: "step={step}"
+    monitor: val_loss
+    mode: min
+    save_top_k: 3
+    every_n_train_steps: null
+    every_n_epochs: 1
+    always_save_nemo: false
+
+  resume_from_checkpoint: null
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
