@@ -28,17 +28,49 @@ from nemo.collections.tts.models import AudioCodecModel
 from nemo.utils import logging
 
 
+def resolve_nemo_path(model_name_or_path: str) -> str:
+    """
+    Resolve a model identifier to a local .nemo file path.
+
+    Accepts:
+      - Local .nemo file path  : returned as-is after existence check.
+      - HuggingFace Hub ID     : ``{org}/{model}``  – NeMo downloads the
+                                 ``{model}.nemo`` file (or the full repo if no
+                                 single .nemo exists) and returns the cached path.
+      - NGC model name         : no ``/`` in the name – NeMo looks up its catalog.
+
+    Returns:
+        Absolute path to a local .nemo file (or unpacked model directory).
+
+    Example::
+
+        path = resolve_nemo_path("nvidia/canary-1b-v2")
+        # → ~/.cache/huggingface/hub/.../canary-1b-v2.nemo
+
+        path = resolve_nemo_path("/ckpts/my_model.nemo")
+        # → /ckpts/my_model.nemo
+    """
+    p = Path(model_name_or_path)
+    if p.exists():
+        return str(p)
+
+    # HF Hub or NGC: reuse NeMo's download + caching pipeline.
+    # return_model_file=True returns the local path without loading the model.
+    from nemo.collections.asr.models import ASRModel
+    return ASRModel.from_pretrained(model_name_or_path, return_model_file=True)
+
+
 def load_pretrained_nemo(cls, model_path_or_name: str):
     """
     Load pretrained NeMo 1.0 model (inheriting from ModelPT). Works with ASR, TTS, codec models.
 
-    Setting ``pretrained_weights=False`` returns a model that has identical architecture with the checkpoint,
-    but is randomly initialized.
+    Accepts a local .nemo path, a HuggingFace Hub ID (``org/model``), or an NGC
+    model name.  HF Hub and NGC models are downloaded and cached automatically.
     """
-    if Path(model_path_or_name).exists() and model_path_or_name.endswith(".nemo"):
-        return cls.restore_from(model_path_or_name)
-    else:
-        return cls.from_pretrained(model_path_or_name)
+    p = Path(model_path_or_name)
+    if p.exists() and p.suffix == ".nemo":
+        return cls.restore_from(str(p))
+    return cls.from_pretrained(model_path_or_name)
 
 
 def load_pretrained_hf(

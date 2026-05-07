@@ -26,7 +26,7 @@ NUM_GPUS=4
 
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CKPT="${SCRIPT_DIR}/canary-qwen-2.5b.ckpt"
+CKPT="${SCRIPT_DIR}/canary-qwen-2.5b.nemo"
 TRAIN_INPUT_CFG="${SCRIPT_DIR}/input_cfg.yaml"
 VAL_CUTS="/path/to/val_cuts.jsonl.gz"
 RESULTS_DIR="${SCRIPT_DIR}/results"
@@ -48,7 +48,7 @@ echo "=================================================="
 
 if [ ! -f "${CKPT}" ]; then
     echo "[ERROR] Checkpoint not found: ${CKPT}"
-    echo "        Run: python save_checkpoint.py --output ${CKPT}"
+    echo "        Run: python convert.py  (produces canary-qwen-2.5b.nemo)"
     exit 1
 fi
 

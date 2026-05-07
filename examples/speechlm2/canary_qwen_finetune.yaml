@@ -21,20 +21,77 @@
 # ─────────────────────────────────────────────────────────────────────────────
 model:
 
-  # Backbone sources.
-  # Always needed for architecture definition.
-  # When pretrained_weights: True  → weights also loaded from these sources.
-  # When pretrained_weights: False → architecture only; weights from ckpt below.
+  # ── Backbone sources ──────────────────────────────────────────────────────
+  #
+  # pretrained_llm : HuggingFace AutoModelForCausalLM ID or local path.
+  # pretrained_asr : NeMo ASR model — three accepted forms:
+  #     (a) HuggingFace Hub ID  → nvidia/canary-1b-flash  (auto-downloaded)
+  #                               nvidia/canary-1b-v2      (auto-downloaded)
+  #     (b) NGC model name      → stt_en_fastconformer_hybrid_large_streaming_80ms
+  #     (c) Local .nemo path    → /ckpts/canary-1b-v2.nemo
+  #
+  # When pretrained_weights: True  → weights loaded from BOTH sources below.
+  # When pretrained_weights: False → architecture only; weights come from
+  #                                   canary_qwen_pretrained_path / module_weights.
   pretrained_llm: Qwen/Qwen3-1.7B
   pretrained_asr: nvidia/canary-1b-flash
 
-  # False = fine-tune the released canary-qwen-2.5b checkpoint.
-  # True  = train from scratch using pretrained_llm + pretrained_asr weights.
+  # ── Weight loading mode ───────────────────────────────────────────────────
+  #
+  # False (default) — fine-tune the released canary-qwen-2.5b checkpoint.
+  #   Architecture is built from the YAML perception block below.
+  #   Weights come from canary_qwen_pretrained_path (and module_weights overrides).
+  #
+  # True  — assemble SALM from scratch using pretrained components.
+  #   Loads pretrained_llm from HuggingFace and pretrained_asr from NeMo/HF Hub.
+  #   No canary_qwen_pretrained_path needed.
+  #   Example: swap in canary-1b-v2 as the encoder:
+  #     pretrained_weights: True
+  #     pretrained_asr: nvidia/canary-1b-v2
+  #     canary_qwen_pretrained_path: null
   pretrained_weights: False
 
-  # Path to canary-qwen-2.5b.ckpt (created by save_checkpoint.py).
-  # Format: torch.save({"state_dict": ..., "config": ...}, path)
-  canary_qwen_pretrained_path: /path/to/canary-qwen-2.5b.ckpt
+  # Path to the full canary-qwen-2.5b.nemo (created by convert.py).
+  # Used as the baseline when module_weights below are not set.
+  canary_qwen_pretrained_path: /path/to/canary-qwen-2.5b.nemo
+
+  # ── Per-module checkpoint overrides ────────────────────────────────────────
+  # Each entry is optional (null = fall back to canary_qwen_pretrained_path).
+  # When set, the module .nemo takes priority over the full checkpoint for that
+  # specific sub-module, allowing independent module versioning.
+  #
+  # Produced by: python convert_modules.py canary-qwen-2.5b.nemo
+  #
+  # Load priority per module:
+  #   module_weights.X  >  canary_qwen_pretrained_path  >  random init
+  #
+  module_weights:
+    # LLM backbone (Qwen transformer layers + lm_head).
+    llm: null          # e.g. /ckpts/canary-qwen-2.5b_llm.nemo
+
+    # Token embedding (embed_tokens, moved outside llm for FSDP/TP safety).
+    embed_tokens: null # e.g. /ckpts/canary-qwen-2.5b_embed_tokens.nemo
+
+    # Full audio perception module (encoder + preprocessor + modality adapter + proj).
+    # Produced by: python convert_modules.py canary-qwen-2.5b.nemo
+    perception: null   # e.g. /ckpts/canary-qwen-2.5b_perception.nemo
+
+    # FastConformer encoder + preprocessor from any NeMo ASR checkpoint.
+    # Loads encoder.* and preprocessor.* keys into model.perception (strict=False).
+    # Ignored when module_weights.perception is already set.
+    #
+    # Accepted values (same three forms as pretrained_asr above):
+    #   nvidia/canary-1b-v2      ← HF Hub ID, auto-downloaded
+    #   nvidia/canary-1b-flash   ← HF Hub ID, auto-downloaded
+    #   /ckpts/canary-1b-v2.nemo ← local path
+    #   (extract first: python convert_modules.py --from-asr canary-1b-v2.nemo)
+    #
+    # Typical use: fine-tune canary-qwen-2.5b but replace the encoder with v2.
+    #   pretrained_weights: False
+    #   canary_qwen_pretrained_path: canary-qwen-2.5b.nemo   ← loads everything
+    #   module_weights:
+    #     perception_from_asr: nvidia/canary-1b-v2            ← then swap encoder
+    perception_from_asr: null
 
   # ── Frozen parameters ─────────────────────────────────────────────────────
   # Regex patterns matched against parameter names (re.compile).
