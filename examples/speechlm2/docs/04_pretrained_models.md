@@ -117,12 +117,20 @@ perception_from_asr: /ckpts/canary-1b-v2.nemo  # encoder 교체 fine-tuning
 
 ### 패턴 4: encoder 추출 후 재사용
 
-`.nemo`로 저장한 뒤 encoder만 분리하면 더 작은 파일로 반복 활용 가능합니다.
+`convert_modules.py --from-asr`는 HF Hub ID를 직접 받으므로 `convert_asr.py`를 먼저 실행할 필요가 없습니다.
 
 ```bash
+# HF Hub ID 직접 전달 (다운로드 + 추출 한 번에)
+python convert_modules.py --from-asr nvidia/canary-1b-v2 --output-dir /ckpts
+# → /ckpts/canary-1b-v2_asr_encoder.nemo  (encoder + preprocessor만 포함)
+```
+
+전체 `.nemo`가 필요한 경우에만 `convert_asr.py`를 먼저 실행합니다.
+
+```bash
+# 필요 시: 전체 모델 저장 후 추출
 python convert_asr.py nvidia/canary-1b-v2 --output canary-1b-v2.nemo
 python convert_modules.py --from-asr canary-1b-v2.nemo --output-dir /ckpts
-# → /ckpts/canary-1b-v2_asr_encoder.nemo  (encoder + preprocessor만 포함)
 ```
 
 이후 학습에서 재사용:
