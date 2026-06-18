@@ -16,8 +16,13 @@ export SSL_DEV_MANIFEST="???"            # small dev manifest for val_loss / che
 # --- DATA: ASR fine-tuning (train-clean-100) ------------------------------
 export FT_TRAIN_MANIFEST="???"           # e.g. /data/LibriSpeech/train_clean_100.json
 export FT_DEV_MANIFEST="???"             # e.g. /data/LibriSpeech/dev_clean.json
-export TOKENIZER_DIR="???"               # BPE tokenizer dir (build once, e.g. process_asr_text_tokenizer.py)
+
+# BPE tokenizer: built from FT_TRAIN_MANIFEST by 00_build_tokenizer.sh.
 export TOKENIZER_TYPE="bpe"
+export TOKENIZER_VOCAB_SIZE="1024"
+export TOKENIZER_BUILD_ROOT="${NEMO_ROOT}/exp/streaming_ssl/tokenizer"   # 00_build_tokenizer.sh writes here
+# auto-matches the dir produced by process_asr_text_tokenizer.py (spe/bpe, no pad/bos/eos flags):
+export TOKENIZER_DIR="${TOKENIZER_BUILD_ROOT}/tokenizer_spe_bpe_v${TOKENIZER_VOCAB_SIZE}"
 
 # --- DATA: evaluation -----------------------------------------------------
 export TEST_MANIFEST="???"               # e.g. /data/LibriSpeech/test_clean.json

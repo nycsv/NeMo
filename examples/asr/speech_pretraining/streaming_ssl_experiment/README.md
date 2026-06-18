@@ -6,12 +6,17 @@ streaming) vs **B\*** (proposed streaming BEST-RQ with dual-mode consistency), p
 chunk sizes.
 
 ## 1. Edit data paths — only `env.sh`
-All data/compute knobs live in `env.sh` (manifests, tokenizer, output dir, GPUs, precision,
-step counts, the eval chunk sweep). Fill in every `???`. Nothing else needs editing.
+All data/compute knobs live in `env.sh` (manifests, output dir, GPUs, precision, step counts,
+the eval chunk sweep). Fill in every `???`. Nothing else needs editing — the tokenizer dir is
+derived automatically from `TOKENIZER_BUILD_ROOT`/`TOKENIZER_VOCAB_SIZE` and produced by
+`00_build_tokenizer.sh`.
 
 ## 2. Run
 ```bash
 cd examples/asr/speech_pretraining/streaming_ssl_experiment
+
+# --- build the BPE tokenizer (once, for finetuning) ---
+./00_build_tokenizer.sh                  # writes $TOKENIZER_DIR (env.sh already points to it)
 
 # --- pretrain (Libriheavy) ---  (run on your cluster; long)
 ./01_pretrain_A_offline.sh
