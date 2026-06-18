@@ -1,0 +1,26 @@
+# B-proposed: STREAMING BEST-RQ with DUAL-MODE CONSISTENCY (the proposed method).
+#
+# Hydra overlay over the B0 streaming config. Same streaming encoder and data; the only change is
+# the SSL objective: EncDecMaskedTokenPredDualModeModel encodes each masked input twice (teacher =
+# large context, student = sampled smaller context) and adds an in-place distillation loss
+#   L = L_mlm(student) + alpha * L_mlm(teacher) + beta * KL(teacher || student)
+# computed on the masked frames. Cost ~2x encoder forward per step.
+#
+# Hypothesis: this beats B0 (encoder-only streaming) downstream across ALL chunk sizes, with the
+# largest gains at low latency (small / zero right context).
+
+defaults:
+  - nest_fast-conformer_streaming
+  - _self_
+
+name: "SSL-NEST-FastConformer-DualMode-Streaming-Bprop"
+ssl_model_class: masked_token_pred_dualmode
+
+model:
+  dual_mode:
+    # teacher = largest-context mode; null -> first entry of encoder.att_context_size ([70,13]).
+    teacher_att_context_size: null
+    # student sampled per batch from these; null -> all encoder.att_context_size except teacher.
+    student_att_context_sizes: null
+    alpha: 1.0   # weight on the teacher MLM loss
+    beta: 1.0    # weight on the consistency (KL) loss

@@ -35,6 +35,7 @@ from nemo.collections.asr.models.rnnt_models import EncDecRNNTModel  # noqa: F40
 from nemo.collections.asr.models.sortformer_diar_models import SortformerEncLabelModel  # noqa: F401
 from nemo.collections.asr.models.ssl_models import (  # noqa: F401
     EncDecDenoiseMaskedTokenPredModel,
+    EncDecMaskedTokenPredDualModeModel,
     EncDecMaskedTokenPredModel,
     SpeechEncDecSelfSupervisedModel,
 )
@@ -53,6 +54,7 @@ __all__ = [
     'EncDecHybridRNNTCTCBPEModelWithPrompt',
     'EncDecHybridRNNTCTCModel',
     'EncDecMaskedTokenPredModel',
+    'EncDecMaskedTokenPredDualModeModel',
     'EncDecMultiTaskModel',
     'EncDecMultiTalkerRNNTBPEModel',
     'EncDecRNNTBPEModel',

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import random
 from math import ceil
 from typing import Any, Dict, List, Optional, Union
 
@@ -21,6 +22,7 @@ from lightning.pytorch import Trainer
 from omegaconf import DictConfig
 
 from nemo.collections.asr.data import audio_to_text_dataset, ssl_dataset
+from nemo.collections.asr.losses.ssl_losses.mlm import MaskedConsistencyLoss
 from nemo.collections.asr.data.audio_to_text_dali import DALIOutputs
 from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
 from nemo.collections.asr.modules.ssl_modules.masking import ConvFeatureMaksingWrapper
@@ -43,7 +45,12 @@ from nemo.core.neural_types import (
 )
 from nemo.utils import logging
 
-__all__ = ['SpeechEncDecSelfSupervisedModel', 'EncDecMaskedTokenPredModel', 'EncDecDenoiseMaskedTokenPredModel']
+__all__ = [
+    'SpeechEncDecSelfSupervisedModel',
+    'EncDecMaskedTokenPredModel',
+    'EncDecDenoiseMaskedTokenPredModel',
+    'EncDecMaskedTokenPredDualModeModel',
+]
 
 
 class SpeechEncDecSelfSupervisedModel(ModelPT, ASRModuleMixin, AccessMixin):
@@ -1056,3 +1063,133 @@ class EncDecDenoiseMaskedTokenPredModel(EncDecMaskedTokenPredModel):
         loss_value = self.loss(masks=masks, decoder_outputs=log_probs, targets=tokens, decoder_lengths=encoded_len)
 
         return {f'{mode}_loss': loss_value}
+
+
+class EncDecMaskedTokenPredDualModeModel(EncDecMaskedTokenPredModel):
+    """Streaming BEST-RQ pre-training with dual-mode consistency (the proposed method).
+
+    Extends the standard (non-denoise) masked-token-prediction SSL with an in-place
+    distillation across attention-context sizes. Per step, the *same* masked input is encoded
+    twice by the *shared* streaming encoder:
+
+      * teacher: a large-context mode (default = the first / largest ``att_context_size``), and
+      * student: a smaller, sampled streaming mode (one of the remaining ``att_context_size``).
+
+    The BEST-RQ masked-token loss is applied to both passes, plus a consistency loss that pulls
+    the student's masked-frame distribution toward the (stop-gradient) teacher's:
+
+        L = L_mlm(student) + alpha * L_mlm(teacher) + beta * KL(teacher || student).
+
+    Rationale: the student must reconstruct the same targets from less right context while
+    matching the teacher, so the limited-context path inherits the full-context behaviour. This
+    targets a downstream-ASR benefit *across all chunk sizes*, especially low latency.
+
+    Requires ``mask_position: pre_conv`` (masking on the mel features), like the NEST recipe, and
+    a streaming encoder configured with a *list* of ``att_context_size`` (the dynamic set). The
+    dual-mode hyper-parameters live under ``cfg.dual_mode``:
+        teacher_att_context_size: list[int] or null -> defaults to the first att_context_size.
+        student_att_context_sizes: list[list[int]] or null -> defaults to the remaining sizes.
+        alpha: weight on the teacher MLM loss (default 1.0).
+        beta:  weight on the consistency (KL) loss (default 1.0).
+    """
+
+    def __init__(self, cfg: DictConfig, trainer: Trainer = None):
+        super().__init__(cfg, trainer)
+
+        if self.pre_encoder is not None:
+            raise ValueError(
+                "EncDecMaskedTokenPredDualModeModel only supports mask_position='pre_conv' "
+                "(masking on mel features); post_conv masking is not supported."
+            )
+
+        # the streaming dynamic-context set this encoder was built with
+        ctx_all = [list(c) for c in self.encoder.att_context_size_all]
+        dual_cfg = self.cfg.get("dual_mode", {})
+
+        teacher_ctx = dual_cfg.get("teacher_att_context_size", None)
+        self.teacher_ctx = list(teacher_ctx) if teacher_ctx is not None else list(ctx_all[0])
+
+        student_ctxs = dual_cfg.get("student_att_context_sizes", None)
+        if student_ctxs is not None:
+            self.student_ctxs = [list(c) for c in student_ctxs]
+        else:
+            # default: every configured context except the teacher
+            self.student_ctxs = [c for c in ctx_all if c != self.teacher_ctx]
+        if len(self.student_ctxs) == 0:
+            # fall back to teacher if only one context was configured (degenerates to standard MLM)
+            self.student_ctxs = [list(self.teacher_ctx)]
+
+        self.consistency_alpha = float(dual_cfg.get("alpha", 1.0))
+        self.consistency_beta = float(dual_cfg.get("beta", 1.0))
+
+        self.consistency_loss = MaskedConsistencyLoss(
+            combine_time_steps=self.cfg.loss.get("combine_time_steps", 1),
+            mask_threshold=self.cfg.loss.get("mask_threshold", 0.8),
+            num_decoders=self.cfg.get("num_books", 1),
+            squeeze_single=self.cfg.get("squeeze_single", False),
+        )
+        logging.info(
+            f"Dual-mode streaming SSL: teacher_ctx={self.teacher_ctx}, student_ctxs={self.student_ctxs}, "
+            f"alpha={self.consistency_alpha}, beta={self.consistency_beta}"
+        )
+
+    def _encode_with_context(self, masked_signal, length, att_context_size):
+        """Run the shared encoder with a forced att_context_size (bypasses random sampling)."""
+        enc = self.encoder
+        saved_all, saved_default = enc.att_context_size_all, enc.att_context_size
+        # length-1 list makes ConformerEncoder.forward_internal skip random sampling and use
+        # self.att_context_size deterministically (see conformer_encoder.py forward_internal).
+        enc.att_context_size_all = [list(att_context_size)]
+        enc.att_context_size = list(att_context_size)
+        try:
+            encoded, encoded_len = enc(audio_signal=masked_signal, length=length)
+        finally:
+            enc.att_context_size_all, enc.att_context_size = saved_all, saved_default
+        return encoded, encoded_len
+
+    def forward_dual(self, input_signal, input_signal_length):
+        """Teacher + student forward over a shared masked input. Returns logits for both modes."""
+        processed_signal, processed_signal_length = self.preprocessor(
+            input_signal=input_signal, length=input_signal_length
+        )
+        # BEST-RQ targets from the clean signal (context-independent), computed once.
+        _, tokens = self.quantizer(input_signal=processed_signal)
+        # single shared mask, applied once on the mel features.
+        masked_signal, masks = self.mask_processor(
+            input_feats=processed_signal, input_lengths=processed_signal_length
+        )
+
+        encoded_t, encoded_len = self._encode_with_context(masked_signal, processed_signal_length, self.teacher_ctx)
+        student_ctx = random.choice(self.student_ctxs)
+        encoded_s, _ = self._encode_with_context(masked_signal, processed_signal_length, student_ctx)
+
+        log_probs_t = self.decoder(encoder_output=encoded_t)
+        log_probs_s = self.decoder(encoder_output=encoded_s)
+        return log_probs_s, log_probs_t, encoded_len, masks, tokens
+
+    def training_step(self, batch, batch_idx=0):
+        input_signal, input_signal_length = batch[0], batch[1]
+        log_probs_s, log_probs_t, encoded_len, masks, tokens = self.forward_dual(
+            input_signal=input_signal, input_signal_length=input_signal_length
+        )
+
+        loss_student = self.loss(
+            masks=masks, decoder_outputs=log_probs_s, targets=tokens, decoder_lengths=encoded_len
+        )
+        loss_teacher = self.loss(
+            masks=masks, decoder_outputs=log_probs_t, targets=tokens, decoder_lengths=encoded_len
+        )
+        loss_consistency = self.consistency_loss(
+            masks=masks, student_outputs=log_probs_s, teacher_outputs=log_probs_t
+        )
+        loss_value = loss_student + self.consistency_alpha * loss_teacher + self.consistency_beta * loss_consistency
+
+        tensorboard_logs = {
+            'learning_rate': self._optimizer.param_groups[0]['lr'],
+            'global_step': self.trainer.global_step,
+            'train_loss': loss_value,
+            'train_loss_student': loss_student,
+            'train_loss_teacher': loss_teacher,
+            'train_loss_consistency': loss_consistency,
+        }
+        return {'loss': loss_value, 'log': tensorboard_logs}

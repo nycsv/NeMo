@@ -49,6 +49,7 @@ from nemo.collections.asr.modules.rnnt import (  # noqa: F401
 from nemo.collections.asr.modules.ssl_modules import (  # noqa: F401
     ConformerMultiLayerFeaturePreprocessor,
     ConvFeatureMaksingWrapper,
+    FSQVectorQuantizer,
     MultiSoftmaxDecoder,
     RandomBlockMasking,
     RandomProjectionVectorQuantizer,
@@ -86,5 +87,6 @@ __all__ = [
     'MultiSoftmaxDecoder',
     'RandomBlockMasking',
     'RandomProjectionVectorQuantizer',
+    'FSQVectorQuantizer',
     'TransformerEncoder',
 ]

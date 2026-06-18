@@ -19,7 +19,10 @@ from nemo.collections.asr.modules.ssl_modules.augmentation import (
 from nemo.collections.asr.modules.ssl_modules.masking import ConvFeatureMaksingWrapper, RandomBlockMasking
 from nemo.collections.asr.modules.ssl_modules.multi_layer_feat import ConformerMultiLayerFeaturePreprocessor
 from nemo.collections.asr.modules.ssl_modules.multi_softmax_decoder import MultiSoftmaxDecoder
-from nemo.collections.asr.modules.ssl_modules.quantizers import RandomProjectionVectorQuantizer
+from nemo.collections.asr.modules.ssl_modules.quantizers import (
+    FSQVectorQuantizer,
+    RandomProjectionVectorQuantizer,
+)
 
 __all__ = [
     'MultiSpeakerNoiseAugmentation',
@@ -29,4 +32,5 @@ __all__ = [
     'ConformerMultiLayerFeaturePreprocessor',
     'MultiSoftmaxDecoder',
     'RandomProjectionVectorQuantizer',
+    'FSQVectorQuantizer',
 ]

@@ -1,0 +1,22 @@
+# A baseline: OFFLINE (bidirectional) BEST-RQ SSL pre-training, non-denoise masked-token-pred.
+#
+# Hydra overlay over the B0 streaming config that reverts ONLY the encoder block to the original
+# fully-offline NEST encoder. Same objective/data as B0 so the offline-vs-streaming pretraining
+# mode is the only changed variable. This is the "A" arm in A vs B0 vs B-proposed.
+
+defaults:
+  - nest_fast-conformer_streaming
+  - _self_
+
+name: "SSL-NEST-FastConformer-Offline-A"
+ssl_model_class: masked_token_pred
+
+model:
+  encoder:
+    # revert to offline / bidirectional encoder
+    causal_downsampling: false
+    att_context_size: [-1, -1]
+    att_context_style: regular
+    att_context_probs: null
+    conv_context_size: null
+    conv_norm_type: 'batch_norm'

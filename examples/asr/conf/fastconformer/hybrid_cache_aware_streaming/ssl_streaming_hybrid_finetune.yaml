@@ -1,0 +1,48 @@
+# Finetune a (streaming or offline) SSL-pretrained FastConformer encoder into a cache-aware
+# streaming Hybrid RNNT+CTC ASR model, for the streaming-SSL research experiment.
+#
+# This is a thin Hydra OVERLAY: it inherits the full streaming hybrid config and overrides only
+#   (1) the encoder att_context_size -> the SAME dynamic multi-context set used in SSL pretraining
+#       (so cache sizes line up and the model supports all chunk sizes), and
+#   (2) init_from_nemo_model -> load ONLY the encoder weights from the SSL .nemo checkpoint;
+#       the RNNT and CTC heads are initialized fresh.
+#
+# Run (same encoder set must match the SSL pretrain config):
+#   python examples/asr/asr_hybrid_transducer_ctc/speech_to_text_hybrid_rnnt_ctc_bpe.py \
+#     --config-path=../conf/fastconformer/hybrid_cache_aware_streaming \
+#     --config-name=ssl_streaming_hybrid_finetune \
+#     init_from_nemo_model.encoder.path=/path/to/ssl_streaming.nemo \
+#     model.tokenizer.dir=/path/to/tokenizer model.tokenizer.type=bpe \
+#     model.train_ds.manifest_filepath=/path/to/train.json \
+#     model.validation_ds.manifest_filepath=/path/to/dev.json
+#
+# Swap the checkpoint to compare pretraining arms (downstream ASR config is identical):
+#   - A  (offline SSL):              init_from_nemo_model.encoder.path=/path/to/ssl_offline.nemo
+#   - B0 (encoder-only streaming):   init_from_nemo_model.encoder.path=/path/to/ssl_streaming.nemo
+#   - B* (proposed dual-mode):       init_from_nemo_model.encoder.path=/path/to/ssl_dualmode.nemo
+# Finetuning data = train-clean-100 (small: consider lowering trainer.max_steps / warmup).
+
+defaults:
+  - fastconformer_hybrid_transducer_ctc_bpe_streaming
+  - _self_
+
+name: "SSL-Streaming-Hybrid-RNNT-CTC-Finetune"
+
+# Load only the encoder submodule from the SSL checkpoint (partial state_dict load).
+init_from_nemo_model:
+  encoder:
+    path: ???            # path to the SSL-pretrained .nemo (offline=A or streaming=B, or FSQ)
+    include: ["encoder"] # transfer encoder weights only; RNNT/CTC heads train from scratch
+
+model:
+  encoder:
+    # MUST match the SSL pretraining att_context_size set (nest_fast-conformer_streaming*.yaml).
+    att_context_size: [[70, 13], [70, 6], [70, 1], [70, 0]]
+    att_context_style: chunked_limited
+    att_context_probs: null
+
+  # Lower LR for finetuning a pretrained encoder.
+  optim:
+    lr: 1e-4
+    sched:
+      warmup_steps: 5000

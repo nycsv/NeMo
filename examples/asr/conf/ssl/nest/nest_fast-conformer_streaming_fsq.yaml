@@ -1,0 +1,194 @@
+# FSQ tokenizer arm (later, separate from A/B0/B-proposed): streaming SSL with FSQ targets.
+#
+# Standalone (NOT a Hydra overlay) because it swaps the quantizer _target_: overlaying a different
+# _target_ onto the BEST-RQ base would leak incompatible kwargs (code_dim/dist_fn) into
+# FSQVectorQuantizer.__init__. Everything except the quantizer + vocab matches B0
+# (nest_fast-conformer_streaming.yaml).
+#
+# FSQ rounds each projected channel to a fixed grid and emits a single mixed-radix token in
+# [0, prod(num_levels)); no codebook table, so it cannot collapse. num_classes MUST equal
+# prod(fsq_num_levels) and num_books MUST be 1.  prod([8,8,8,4,4]) = 8192 (matches BEST-RQ vocab).
+
+name: "SSL-NEST-FSQ-FastConformer-Streaming"
+ssl_model_class: masked_token_pred
+
+model:
+  sample_rate: 16000
+  num_classes: 8192               # MUST equal prod(fsq_num_levels)
+  num_books: 1
+  fsq_num_levels: [8, 8, 8, 4, 4]
+  squeeze_single: false
+  mask_position: pre_conv
+
+  train_ds:
+    manifest_filepath: ???
+    sample_rate: ${model.sample_rate}
+    batch_size: 8
+    shuffle: true
+    num_workers: 8
+    pin_memory: true
+    use_start_end_token: false
+    trim_silence: false
+    max_duration: 60.0
+    min_duration: 1.0
+    drop_last: true
+    is_tarred: false
+    tarred_audio_filepaths: null
+    shuffle_n: 2048
+    bucketing_strategy: "synced_randomized"
+    bucketing_batch_size: null
+
+  validation_ds:
+    manifest_filepath: ???
+    sample_rate: ${model.sample_rate}
+    batch_size: 8
+    shuffle: false
+    num_workers: 8
+    pin_memory: true
+    use_start_end_token: false
+    max_duration: 60.0
+    min_duration: 1.0
+
+  preprocessor:
+    _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
+    sample_rate: ${model.sample_rate}
+    normalize: "per_feature"
+    window_size: 0.025
+    window_stride: 0.01
+    window: "hann"
+    features: 80
+    n_fft: 512
+    log: true
+    frame_splicing: 1
+    dither: 0.00001
+    pad_to: 16
+    pad_value: 0.0
+
+  spec_augment:
+    _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+    freq_masks: 0
+    time_masks: 0
+    freq_width: 27
+    time_width: 0.05
+
+  masking:
+    _target_: nemo.collections.asr.modules.RandomBlockMasking
+    block_size: 40
+    mask_prob: 0.01
+    feat_in: ${model.preprocessor.features}
+    freeze: true
+    allow_overlap: true
+
+  quantizer:
+    _target_: nemo.collections.asr.modules.FSQVectorQuantizer
+    feat_in: ${model.preprocessor.features}
+    num_levels: ${model.fsq_num_levels}
+    freeze: true
+    squeeze_single: ${model.squeeze_single}
+    combine_time_steps: ${model.encoder.subsampling_factor}
+
+  encoder:
+    _target_: nemo.collections.asr.modules.ConformerEncoder
+    feat_in: ${model.preprocessor.features}
+    feat_out: -1
+    n_layers: 17
+    d_model: 512
+    use_bias: True
+
+    subsampling: dw_striding
+    subsampling_factor: 8
+    subsampling_conv_channels: 256
+    causal_downsampling: true
+
+    ff_expansion_factor: 4
+
+    self_attention_model: rel_pos
+    n_heads: 8
+
+    att_context_size: [[70, 13], [70, 6], [70, 1], [70, 0]]
+    att_context_style: chunked_limited
+    att_context_probs: null
+
+    xscaling: true
+    untie_biases: true
+    pos_emb_max_len: 5000
+
+    conv_kernel_size: 9
+    conv_norm_type: 'layer_norm'
+    conv_context_size: causal
+
+    dropout: 0.1
+    dropout_pre_encoder: 0.1
+    dropout_emb: 0.0
+    dropout_att: 0.1
+
+    stochastic_depth_drop_prob: 0.0
+    stochastic_depth_mode: linear
+    stochastic_depth_start_layer: 1
+
+  decoder:
+    _target_: nemo.collections.asr.modules.MultiSoftmaxDecoder
+    feat_in: ${model.encoder.d_model}
+    num_classes: ${model.num_classes}
+    num_decoders: ${model.num_books}
+    squeeze_single: ${model.squeeze_single}
+    use_bias: true
+
+  loss:
+    _target_: nemo.collections.asr.losses.MultiMLMLoss
+    combine_time_steps: ${model.encoder.subsampling_factor}
+    mask_threshold: 0.8
+    num_decoders: ${model.num_books}
+    squeeze_single: ${model.squeeze_single}
+
+  optim:
+    name: adamw
+    lr: 5.0
+    betas: [0.9, 0.98]
+    weight_decay: 1e-3
+    sched:
+      name: NoamAnnealing
+      d_model: ${model.encoder.d_model}
+      warmup_steps: 25000
+      warmup_ratio: null
+      min_lr: 1e-6
+
+trainer:
+  devices: -1
+  num_nodes: 1
+  max_epochs: -1
+  max_steps: 500000
+  val_check_interval: 2500
+  accelerator: auto
+  strategy: ddp
+  accumulate_grad_batches: 1
+  gradient_clip_val: 0.0
+  precision: 32
+  log_every_n_steps: 10
+  enable_progress_bar: True
+  num_sanity_val_steps: 0
+  check_val_every_n_epoch: 1
+  sync_batchnorm: true
+  enable_checkpointing: False
+  logger: false
+  benchmark: false
+
+exp_manager:
+  exp_dir: null
+  name: ${name}
+  create_tensorboard_logger: true
+  create_checkpoint_callback: true
+  checkpoint_callback_params:
+    monitor: "val_loss"
+    mode: "min"
+    save_top_k: 1
+    always_save_nemo: True
+    filename: '${name}--{${exp_manager.checkpoint_callback_params.monitor}:.3f}-{step}'
+
+  resume_if_exists: true
+  resume_ignore_no_checkpoint: true
+
+  create_wandb_logger: false
+  wandb_logger_kwargs:
+    name: null
+    project: null
