@@ -37,10 +37,84 @@ class ToAudio(torch.utils.data.Dataset):
         return {"cuts": cuts, "audios": audios, "audio_lens": audio_lens}
 
 
+def _is_hf_model(name: str) -> bool:
+    """
+    True when ``name`` should be loaded via ``from_pretrained``:
+      - a HuggingFace Hub ID (no local path exists), or
+      - a local HF-format directory (contains ``config.json``), i.e. the output
+        of ``to_hf.py`` / ``save_pretrained``.
+
+    False for a raw training checkpoint: a ``.ckpt`` file or a distributed
+    checkpoint directory (no ``config.json``).
+    """
+    p = Path(name)
+    if not p.exists():
+        return True  # treat as a Hub ID / NGC name
+    if p.is_dir() and (p / "config.json").exists():
+        return True
+    return False
+
+
+def _load_train_checkpoint(model: torch.nn.Module, ckpt_path: str) -> None:
+    """
+    Load a raw training checkpoint into a freshly built model (strict=False).
+
+    Handles both:
+      - a directory  → FSDP/TP distributed checkpoint (torch.distributed.checkpoint)
+      - a ``.ckpt``  → Lightning checkpoint (weights live under ``state_dict``)
+    """
+    p = Path(ckpt_path)
+    if p.is_dir():
+        from torch.distributed.checkpoint import load
+
+        state_dict = {"state_dict": model.state_dict()}
+        load(state_dict, checkpoint_id=str(p))
+        loaded = state_dict["state_dict"]
+    else:
+        ckpt = torch.load(str(p), map_location="cpu", weights_only=False)
+        loaded = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+
+    missing, unexpected = model.load_state_dict(loaded, strict=False)
+    logging.info(f"Loaded training checkpoint: {ckpt_path}")
+    if missing:
+        logging.warning(f"  missing keys   : {len(missing)} (e.g. {missing[:5]})")
+    if unexpected:
+        logging.warning(f"  unexpected keys: {len(unexpected)} (e.g. {unexpected[:5]})")
+
+
+def load_eval_model(cfg: "SalmEvalConfig"):
+    """Load a SALM model from either an HF-format model or a raw training checkpoint."""
+    cls = SALMWithAsrDecoder if cfg.use_asr_decoder else SALM
+
+    if _is_hf_model(cfg.pretrained_name):
+        return cls.from_pretrained(cfg.pretrained_name)
+
+    # Raw training checkpoint (.ckpt file or distributed-checkpoint dir).
+    if not cfg.ckpt_config:
+        raise ValueError(
+            f"'{cfg.pretrained_name}' is a raw training checkpoint, not an HF model.\n"
+            "Set ckpt_config=<exp_config.yaml> so the architecture can be rebuilt, e.g.:\n"
+            "  python salm_eval.py pretrained_name=<ckpt> ckpt_config=<log_dir>/exp_config.yaml ...\n"
+            "Alternatively export it to HF format first with to_hf.py and pass that directory."
+        )
+    model_cfg = OmegaConf.to_container(OmegaConf.load(cfg.ckpt_config).model, resolve=True)
+    # Build architecture only; the trained weights below supersede any base weights.
+    model_cfg["pretrained_weights"] = False
+    model = cls(model_cfg)
+    _load_train_checkpoint(model, cfg.pretrained_name)
+    return model
+
+
 @dataclass
 class SalmEvalConfig:
     pretrained_name: str
     inputs: str
+    # Config used to rebuild the model when ``pretrained_name`` is a raw training
+    # checkpoint (a Lightning ``.ckpt`` file or an FSDP/TP distributed-checkpoint
+    # directory) instead of an HF-format model. Point it at the ``exp_config.yaml``
+    # (or training yaml) whose ``.model`` subtree describes the architecture.
+    # Not needed for HF Hub IDs or ``to_hf.py``/``save_pretrained`` output dirs.
+    ckpt_config: Optional[str] = None
     batch_size: int = 64
     max_new_tokens: int = 128
     output_manifest: Optional[str] = "generations.jsonl"
@@ -58,10 +132,7 @@ class SalmEvalConfig:
 def main(cfg: SalmEvalConfig):
     logging.info(f'Hydra config:\n{OmegaConf.to_yaml(cfg)}')
 
-    if cfg.use_asr_decoder:
-        model = SALMWithAsrDecoder.from_pretrained(cfg.pretrained_name)
-    else:
-        model = SALM.from_pretrained(cfg.pretrained_name)
+    model = load_eval_model(cfg)
     model = model.eval().to(getattr(torch, cfg.dtype)).to(cfg.device)
 
     cuts = guess_parse_cutset(cfg.inputs).sort_by_duration()

@@ -67,11 +67,20 @@ def load_state_dict_from_ckpt(ckpt_path: str) -> dict:
 
 
 def _load_state_dict_from_nemo(nemo_path: str) -> dict:
-    """Extract and load model_weights.ckpt from a .nemo tarball."""
+    """Extract and load model_weights.ckpt from a .nemo tarball.
+
+    Uses extractall so it works regardless of how the tarball was packed:
+      - flat member names   (``model_weights.ckpt``) — convert_modules.py
+      - leading ``./``      (``./model_weights.ckpt``) — convert.py's
+                             ``tar.add(dir, arcname=".")``
+    (A bare ``tar.extract("model_weights.ckpt")`` raises KeyError on the latter.)
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         with tarfile.open(nemo_path) as tar:
-            tar.extract("model_weights.ckpt", path=tmpdir, filter="data")
+            tar.extractall(path=tmpdir, filter="data")
         weights_path = Path(tmpdir) / "model_weights.ckpt"
+        if not weights_path.exists():
+            raise FileNotFoundError(f"model_weights.ckpt not found inside {nemo_path}")
         state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
     logging.info(f"  Format : .nemo  ({len(state_dict)} keys)")
     return state_dict

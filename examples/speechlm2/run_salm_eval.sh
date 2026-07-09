@@ -2,6 +2,10 @@
 set -euo pipefail
 
 PRETRAINED_NAME="salm_results/checkpoints/step=1000.ckpt"
+# Required only when PRETRAINED_NAME is a raw training checkpoint (.ckpt file or
+# FSDP/TP distributed-checkpoint dir): the exp config whose .model subtree rebuilds
+# the architecture. Leave empty ("") for HF Hub IDs or to_hf.py / save_pretrained dirs.
+CKPT_CONFIG="salm_results/exp_config.yaml"
 INPUT_MANIFEST="/data/val_manifest.json"   # NeMo JSON manifest
 OUTPUT_MANIFEST="eval_output.jsonl"
 BATCH_SIZE=32
@@ -20,10 +24,22 @@ if [ ! -f "$INPUT_MANIFEST" ]; then
     exit 1
 fi
 
+# ckpt_config는 raw 체크포인트일 때만 필요 (설정된 경우 존재 확인)
+if [ -n "$CKPT_CONFIG" ] && [ ! -f "$CKPT_CONFIG" ]; then
+    echo "[ERROR]: ckpt_config not found: $CKPT_CONFIG"
+    exit 1
+fi
+
 echo "[INFO] 평가 시작"
 echo "[INFO] 모델: $PRETRAINED_NAME"
 echo "[INFO] 입력: $INPUT_MANIFEST"
 echo "[INFO] 출력: $OUTPUT_MANIFEST"
+
+# ckpt_config는 raw 체크포인트(.ckpt / dist-ckpt dir)일 때만 전달; HF 모델이면 생략
+EXTRA_ARGS=()
+if [ -n "$CKPT_CONFIG" ]; then
+    EXTRA_ARGS+=( ckpt_config="$CKPT_CONFIG" )
+fi
 
 python "examples/speechlm2/salm_eval.py" \
     pretrained_name="$PRETRAINED_NAME" \
@@ -34,6 +50,7 @@ python "examples/speechlm2/salm_eval.py" \
     use_normalizer="$NORMALIZER" \
     device="$DEVICE" \
     dtype="$DTYPE" \
-    verbose=true
+    verbose=true \
+    "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
 
 echo "[INFO] Completed: $OUTPUT_MANIFEST"
