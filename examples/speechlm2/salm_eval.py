@@ -98,8 +98,13 @@ def load_eval_model(cfg: "SalmEvalConfig"):
             "Alternatively export it to HF format first with to_hf.py and pass that directory."
         )
     model_cfg = OmegaConf.to_container(OmegaConf.load(cfg.ckpt_config).model, resolve=True)
-    # Build architecture only; the trained weights below supersede any base weights.
-    model_cfg["pretrained_weights"] = False
+    # NOTE: keep pretrained_weights as the training config specifies (typically True).
+    # A raw training config's cfg.perception only has {target, output_dim}; the
+    # preprocessor/encoder/output_dim are injected by setup_speech_encoder() from the
+    # pretrained ASR *only when pretrained_weights=True*. Forcing it False would build
+    # AudioPerceptionModule from that bare config and crash with
+    # "Missing key preprocessor" (perception.py). The trained checkpoint loaded below
+    # then overwrites the base ASR/LLM weights. This mirrors to_hf.py's reconstruction.
     model = cls(model_cfg)
     _load_train_checkpoint(model, cfg.pretrained_name)
     return model

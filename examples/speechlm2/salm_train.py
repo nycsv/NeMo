@@ -22,6 +22,7 @@ from omegaconf import OmegaConf
 from nemo.collections.speechlm2 import SALM, DataModule, SALMDataset
 from nemo.core.config import hydra_runner
 from nemo.lightning.pytorch.callbacks import PytorchProfilerCallback
+from nemo.utils import logging
 from nemo.utils.exp_manager import exp_manager
 from nemo.utils.trainer_utils import resolve_trainer_cfg
 
@@ -57,6 +58,32 @@ def _patch_save_to(model: SALM, cfg) -> None:
     model.save_to = types.MethodType(save_to, model)
 
 
+def _maybe_enable_gradient_checkpointing(model: SALM, cfg) -> None:
+    """
+    Enable HuggingFace activation (gradient) checkpointing on the LLM.
+
+    Trades ~20-30% extra compute for a large reduction in activation memory — the
+    main lever for full fine-tuning on long audio. Gated by
+    ``cfg.model.use_gradient_checkpointing``.
+
+    Only the LLM is checkpointed: NeMo's ConformerEncoder has no native activation
+    checkpointing, and the audio encoder is a single non-autoregressive forward that
+    is rarely the memory bottleneck. The flag is read at forward time, so enabling it
+    here (before Lightning's configure_model applies FSDP2) composes with sharding.
+    """
+    if not cfg.model.get("use_gradient_checkpointing", False):
+        return
+    llm = model.llm
+    if not hasattr(llm, "gradient_checkpointing_enable"):
+        logging.warning("LLM has no gradient_checkpointing_enable(); skipping activation checkpointing.")
+        return
+    # use_reentrant=False is the robust variant and composes with FSDP2.
+    llm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    if getattr(llm, "config", None) is not None:
+        llm.config.use_cache = False  # required whenever gradient checkpointing is on
+    logging.info("Gradient checkpointing enabled on the LLM (use_reentrant=False, use_cache=False).")
+
+
 @hydra_runner(config_path="conf", config_name="salm")
 def train(cfg):
     OmegaConf.resolve(cfg)
@@ -70,7 +97,8 @@ def train(cfg):
         model = SALM(OmegaConf.to_container(cfg.model, resolve=True))
 
     _patch_save_to(model, cfg.model)
- 
+    _maybe_enable_gradient_checkpointing(model, cfg)
+
     profiler_cfg = cfg.get("profiler", None)
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if profiler_cfg is not None and profiler_cfg.get("enabled", False) and local_rank == profiler_cfg.get("rank", 0):
