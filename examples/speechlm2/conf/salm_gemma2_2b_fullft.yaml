@@ -1,0 +1,199 @@
+# salm_gemma2_2b_fullft.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Full fine-tuning of SALM: canary-1b-v2 encoder + Gemma-2-2B LLM, BOTH unfrozen.
+# Target hardware: 8x H100 (80GB), single node, FSDP2 (ZeRO-3).
+#
+# Launch:
+#   torchrun --standalone --nnodes=1 --nproc_per_node=8 \
+#       examples/speechlm2/salm_train.py \
+#       --config-path=conf --config-name=salm_gemma2_2b_fullft \
+#       data.train_ds.input_cfg.0.cuts_path=/path/to/train_cuts.jsonl.gz \
+#       data.validation_ds.datasets.val_set_0.input_cfg.0.cuts_path=/path/to/val_cuts.jsonl.gz
+#
+# What differs from conf/salm_fullft.yaml (the Qwen3-1.7B full-FT config):
+#   * pretrained_llm: google/gemma-2-2b-it   (was Qwen/Qwen3-1.7B)
+#   * prompt_format:  gemma                   (was qwen)
+#   * output_dim:     2304                    (Gemma-2-2B hidden_size; was 2048)
+#   * NO system_prompt — the Gemma chat template has no system role (like Qwen).
+#
+# Gemma-specific notes:
+#   * Gemma REQUIRES bf16. fp16 overflows the activations. Keep bf16 everywhere.
+#   * Use a TEXT-ONLY Gemma checkpoint. gemma-2-* are all text (OK). Do NOT use a
+#     multimodal Gemma-3 vision checkpoint here — AutoModelForCausalLM won't expose
+#     the flat .model.embed_tokens / .lm_head structure SALM assumes.
+#   * Keep tensor_parallel_size=1. The TP plan in SALM.configure_model() is written
+#     for Llama/Qwen blocks and does NOT cover Gemma-2's pre/post_feedforward_layernorm.
+#     FSDP2 (data_parallel) is architecture-agnostic and used here.
+#   * Gemma ties lm_head <-> embed_tokens (same as Qwen3-1.7B) — already handled.
+#   * You must accept the Gemma license on HF and `huggingface-cli login` first.
+# ─────────────────────────────────────────────────────────────────────────────
+model:
+  # Every name/path here starting with 'pretrained' is used to initialize the model weights.
+  pretrained_llm: google/gemma-2-2b-it
+  pretrained_asr: nvidia/canary-1b-v2
+
+  pretrained_weights: True  # When False, we use pretrained_name to load the architecture, but with random init
+
+  # Load the pretrained LLM directly in bf16 (matches precision: bf16-true). Halves the
+  # LLM's host-RAM footprint — important because each of the 8 data-parallel ranks builds
+  # the model on the same host. Gemma additionally REQUIRES bf16 for numerical stability.
+  torch_dtype: bfloat16
+
+  # FULL FINE-TUNING: freeze nothing. Both the canary encoder and the Gemma-2 LLM
+  # (incl. embed_tokens) are trainable. Do NOT enable the `lora:` block below —
+  # LoRA would auto-freeze the LLM and defeat the purpose of full FT.
+  freeze_params: []
+  prevent_freeze_params: []
+
+  # Activation (gradient) checkpointing on the LLM: trades ~20-30% compute for a
+  # large activation-memory reduction. Read by salm_train.py (not by SALM itself).
+  use_gradient_checkpointing: true
+
+  prompt_format: gemma
+  audio_locator_tag: "<|audioplaceholder|>"  # placeholder token for audio turn is expected
+
+  # LoRA intentionally left OFF for full fine-tuning. (Enabling it freezes the LLM.)
+  # lora:
+  #   task_type: CAUSAL_LM
+  #   r: 128
+  #   lora_alpha: 256
+  #   lora_dropout: 0.01
+  #   target_modules: ["q_proj", "v_proj"]
+
+  perception:
+     target: nemo.collections.speechlm2.modules.perception.AudioPerceptionModule
+     output_dim: 2304  # must equal Gemma-2-2B hidden_size (auto-overridden by setup_speech_encoder, kept explicit for clarity)
+     modality_adapter:
+       _target_: nemo.collections.speechlm2.modules.perception.IdentityConnector
+       d_model: 1024   # must equal the canary-1b-v2 encoder d_model
+     # spec_augment:
+     #   _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+     #   freq_masks: 2 # set to zero to disable it
+     #   time_masks: 10 # set to zero to disable it
+     #   freq_width: 27
+     #   time_width: 5  # 5 frames = 50ms
+
+  optimizer:
+    _target_: torch.optim.AdamW
+    # Full FT of a pretrained LLM + encoder needs a MUCH smaller LR than the
+    # adapter-only default (5e-4). 1e-5 is a safe start; sweep 5e-6..3e-5.
+    lr: 1e-5
+    betas: [0.9, 0.98]
+    weight_decay: 1e-3
+    foreach: true # set to false if having issues with tensor-parallelism
+
+  lr_scheduler:
+    _target_: nemo.core.optim.lr_scheduler.CosineAnnealing
+    warmup_steps: 2000   # longer warmup helps stability when unfreezing everything
+    min_lr: 1e-6
+    max_steps: ${trainer.max_steps}
+
+trainer:
+  devices: -1
+  accelerator: gpu
+  num_nodes: 1
+  precision: bf16-true   # Gemma requires bf16; if you see divergence, try bf16-mixed (keeps fp32 master)
+  logger: False # logger provided by exp_manager
+  enable_checkpointing: False
+  use_distributed_sampler: False
+  max_steps: 100000
+  limit_train_batches: 5000  # "epoch" size
+  val_check_interval: ${trainer.limit_train_batches}
+  limit_val_batches: 10
+  log_every_n_steps: 10
+  num_sanity_val_steps: 1
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  strategy:
+    # FSDP2 (ZeRO-3) across all 8 GPUs of the node. SALM.configure_model() shards
+    # each LLM layer, embed_tokens, lm_head, the LLM, and perception onto this mesh.
+    _target_: lightning.pytorch.strategies.ModelParallelStrategy
+    tensor_parallel_size: 1
+    data_parallel_size: 8
+
+data:
+  train_ds:
+    sample_rate: 16000
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08
+    input_cfg:
+      - type: lhotse_as_conversation
+        cuts_path: ???  # needs to be set
+        audio_locator_tag: ${model.audio_locator_tag}
+        tags:
+          # NOTE: Gemma has NO system role. Do NOT add a `system_prompt` tag here.
+          context: "Repeat after me, typing in lowercase."
+    seed: 42
+    shuffle: true
+    shard_seed: "randomized"
+    num_workers: 1          # keep low: each worker adds host-RAM; 64GB host is tight with 8 ranks
+    # RECOMMENDED: token bucketing instead of a fixed batch_size. Calibrate batch_tokens
+    # with OOMptimizer (uses SALM.oomptimizer_schema); paste resulting bins/sizes below.
+    batch_size: null
+    use_bucketing: true
+    use_multimodal_sampling: true
+    measure_total_length: true
+    batch_tokens: 4000
+    bucket_duration_bins: [64, 128, 256, 384, 512, 768, 1024, 1280, 1536, 2048]
+    num_buckets: 10
+    bucket_buffer_size: 2000   # lower buffer to save host RAM on the 64GB box (raise if RAM allows)
+    # For a quick smoke test instead, comment the bucketing block above and set:
+    # batch_size: 2
+    # use_bucketing: false
+
+  validation_ds:
+    # The entries under 'datasets' are a list of separate dataloaders.
+    prompt_format: ${model.prompt_format}
+    token_equivalent_duration: 0.08
+    datasets:
+      val_set_0:  # rename to your dataset name, add more as needed
+        input_cfg:
+          - type: lhotse_as_conversation
+            cuts_path: ???  # needs to be set
+            audio_locator_tag: ${model.audio_locator_tag}
+            tags:
+              # NOTE: Gemma has NO system role. Do NOT add a `system_prompt` tag here.
+              context: "Repeat after me, typing in lowercase."
+    sample_rate: 16000
+    batch_size: 1
+    seed: 42
+    shard_seed: "randomized"
+
+exp_manager:
+   exp_dir: null
+   explicit_log_dir: salm_gemma2_2b_fullft_results/
+   name: salm_gemma2_2b_fullft
+   create_tensorboard_logger: false
+   create_checkpoint_callback: true
+   use_datetime_version: true
+   max_time_per_run: 00:03:50:00
+
+   resume_from_checkpoint: null # The path to a checkpoint file to continue the training, restores the whole state including the epoch, step, LR schedulers, apex, etc.
+   # you need to set these two to True to continue the training
+   resume_if_exists: true
+   resume_ignore_no_checkpoint: true
+
+   # You may use this section to create a W&B logger
+   create_wandb_logger: false
+   wandb_logger_kwargs:
+     name: development-run
+     project: salm
+     resume: true
+
+   checkpoint_callback_params:
+     filename: "{step}"
+     monitor: val_acc
+     mode: max
+     every_n_train_steps: null
+     every_n_epochs: 1
+     save_top_k: 1
+     always_save_nemo: false
+     save_nemo_on_train_end: false
+
+profiler:
+   enabled: false       # set to true to enable PyTorch profiling
+   start_step: 10       # global step to start profiling
+   end_step: 20         # global step to stop profiling
+   warmup_steps: 0      # warmup steps within the profiling window
+   active_steps: 5      # number of active steps to capture traces
+   trace_dir: null      # output directory; defaults to ./traces if null
