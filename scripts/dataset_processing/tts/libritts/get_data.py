@@ -1,4 +1,5 @@
-# Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,6 +31,8 @@ from pathlib import Path
 
 from tqdm import tqdm
 
+from nemo.utils.tar_utils import safe_extract
+
 parser = argparse.ArgumentParser(description='Download LibriTTS and create manifests')
 parser.add_argument("--data-root", required=True, type=Path)
 parser.add_argument("--data-sets", default="dev_clean", type=str)
@@ -56,9 +59,8 @@ def __maybe_download_file(source_url, destination_path):
 
 def __extract_file(filepath, data_dir):
     try:
-        tar = tarfile.open(filepath)
-        tar.extractall(data_dir)
-        tar.close()
+        with tarfile.open(filepath) as tar:
+            safe_extract(tar, str(data_dir))
     except Exception:
         print(f"Error while extracting {filepath}. Already extracted?")
 

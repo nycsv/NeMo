@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -44,6 +45,8 @@ from pathlib import Path
 from typing import List
 
 from tqdm import tqdm
+
+from nemo.utils.tar_utils import safe_extract
 
 parser = argparse.ArgumentParser(description='Downloads and processes Mozilla Common Voice dataset.')
 parser.add_argument("--data_root", default='CommonVoice_dataset/', type=str, help="Directory to store the dataset.")
@@ -192,9 +195,8 @@ def main():
 
         os.makedirs(target_unpacked_dir, exist_ok=True)
         logging.info("Unpacking corpus to {} ...".format(target_unpacked_dir))
-        tar = tarfile.open(target_file)
-        tar.extractall(target_unpacked_dir)
-        tar.close()
+        with tarfile.open(target_file) as tar:
+            safe_extract(tar, target_unpacked_dir)
         if args.cleanup:
             logging.info("removing tar archive to save space")
             os.remove(target_file)

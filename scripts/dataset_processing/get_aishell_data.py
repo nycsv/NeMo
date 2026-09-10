@@ -1,4 +1,5 @@
-# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,6 +24,8 @@ import tarfile
 import urllib.request
 
 from tqdm import tqdm
+
+from nemo.utils.tar_utils import safe_extract
 
 parser = argparse.ArgumentParser(description="Aishell Data download")
 parser.add_argument("--data_root", required=True, default=None, type=str)
@@ -88,9 +91,8 @@ def __extract_all_files(filepath: str, data_root: str, data_dir: str):
 
 def extract_file(filepath: str, data_dir: str):
     try:
-        tar = tarfile.open(filepath)
-        tar.extractall(data_dir)
-        tar.close()
+        with tarfile.open(filepath) as tar:
+            safe_extract(tar, data_dir)
     except Exception:
         logging.info("Not extracting. Maybe already there?")
 

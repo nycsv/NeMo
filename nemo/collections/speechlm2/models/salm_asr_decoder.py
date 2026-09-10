@@ -1,4 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -667,6 +668,9 @@ class SALMWithAsrDecoder(LightningModule, HFHubMixin):
                     "type": NeuralType(("B", "T"), LabelsType()),
                     "seq_length": "output",
                     "vocab_size": self.text_vocab_size,
+                    "excluded_token_ids": [self.audio_locator_tag_id],
+                    "excluded_token_replacement_id": self.text_pad_id,
+                    "forced_token_ids": {0: self.audio_locator_tag_id},
                 },
                 {"name": "loss_mask", "type": NeuralType(("B", "T"), MaskType()), "seq_length": "output"},
             ],

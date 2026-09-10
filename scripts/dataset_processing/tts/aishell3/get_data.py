@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +28,8 @@ from pathlib import Path
 import numpy as np
 from nemo_text_processing.text_normalization.normalize import Normalizer
 from opencc import OpenCC
+
+from nemo.utils.tar_utils import safe_extract
 
 URL = "https://www.openslr.org/resources/93/data_aishell3.tgz"
 
@@ -67,9 +70,8 @@ def __maybe_download_file(source_url, destination_path):
 
 def __extract_file(filepath, data_dir):
     try:
-        tar = tarfile.open(filepath)
-        tar.extractall(data_dir)
-        tar.close()
+        with tarfile.open(filepath) as tar:
+            safe_extract(tar, str(data_dir))
     except Exception:
         print(f"Error while extracting {filepath}. Already extracted?")
 
